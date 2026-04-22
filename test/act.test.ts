@@ -26,10 +26,10 @@ describe.skipIf(!STAMP)('ActClient integration', () => {
     const decRef = await act.decryptRef(encRef, { granteePriv, publisherPub: creatorPub, historyRef })
     expect(decRef).toEqual(manifestRef)
 
-    const { historyRef: newHistoryRef } = await act.revokeGrantee(granteePub, {
-      publisher: creatorPriv,
-      historyRef,
-    })
+    const { historyRef: newHistoryRef } = await act.patchGrantees(
+      { revoke: [granteePub] },
+      { publisher: creatorPriv, historyRef },
+    )
 
     await expect(
       act.decryptRef(encRef, { granteePriv, publisherPub: creatorPub, historyRef: newHistoryRef }),

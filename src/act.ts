@@ -89,25 +89,51 @@ export class ActClient {
     return decrypt(encRef, accessKey, 0)
   }
 
-  async addGrantee(
-    granteePub: Uint8Array,
+  /**
+   * Add and/or revoke grantees in one atomic history step.
+   * Mirrors bee-js's `patchGrantees(stamp, ref, historyRef, { add, revoke })`.
+   *
+   * Adding a grantee that is already present is a no-op.
+   * Revoking generates a fresh access key so the removed party cannot decrypt
+   * content encrypted after revocation.
+   */
+  async patchGrantees(
+    grantees: { add?: Uint8Array[]; revoke?: Uint8Array[] },
     args: { publisher: Uint8Array; historyRef: Uint8Array },
   ): Promise<{ historyRef: Uint8Array }> {
-    const accessKey = await this.getAccessKeyAsPublisher(args.publisher, args.historyRef)
-    const currentGrantees = await this.listGrantees(args)
-    if (containsPubkey(currentGrantees, granteePub)) {
+    const toAdd = grantees.add ?? []
+    const toRevoke = grantees.revoke ?? []
+    if (toAdd.length === 0 && toRevoke.length === 0) {
       return { historyRef: args.historyRef }
     }
 
-    const nextGrantees = [...currentGrantees, granteePub]
+    const currentGrantees = await this.getGrantees(args)
+    let next = currentGrantees
+
+    for (const pub of toAdd) {
+      if (!containsPubkey(next, pub)) {
+        next = [...next, pub]
+      }
+    }
+
+    const revoking = toRevoke.length > 0
+    for (const pub of toRevoke) {
+      next = removePubkey(next, pub)
+    }
+
+    // Only rotate the access key when revoking; adds can reuse the existing one.
+    const accessKey = revoking
+      ? randomAccessKey()
+      : await this.getAccessKeyAsPublisher(args.publisher, args.historyRef)
+
     const kvs = createEmptyManifest()
-    for (const pk of nextGrantees) {
+    for (const pk of next) {
       const { lookupKey, accessKeyDecryptionKey } = deriveSessionKeys(args.publisher, pk)
       manifestPut(kvs, lookupKey, encrypt(accessKey, accessKeyDecryptionKey, 0))
     }
 
     const kvsRef = await uploadKvs(this.opts.bee, this.opts.stamp, kvs)
-    const encryptedGlRef = await this.saveGranteeList(args.publisher, nextGrantees)
+    const encryptedGlRef = await this.saveGranteeList(args.publisher, next)
 
     const history = await downloadHistory(this.opts.bee, args.historyRef)
     await this.appendHistoryEntry(history, {
@@ -118,36 +144,11 @@ export class ActClient {
     return { historyRef: await uploadHistory(this.opts.bee, this.opts.stamp, history) }
   }
 
-  async revokeGrantee(
-    granteePub: Uint8Array,
-    args: { publisher: Uint8Array; historyRef: Uint8Array },
-  ): Promise<{ historyRef: Uint8Array }> {
-    const currentGrantees = await this.listGrantees(args)
-    const remaining = removePubkey(currentGrantees, granteePub)
-    if (remaining.length === currentGrantees.length) {
-      return { historyRef: args.historyRef }
-    }
-
-    const newAccessKey = randomAccessKey()
-    const kvs = createEmptyManifest()
-    for (const pk of remaining) {
-      const { lookupKey, accessKeyDecryptionKey } = deriveSessionKeys(args.publisher, pk)
-      manifestPut(kvs, lookupKey, encrypt(newAccessKey, accessKeyDecryptionKey, 0))
-    }
-
-    const kvsRef = await uploadKvs(this.opts.bee, this.opts.stamp, kvs)
-    const encryptedGlRef = await this.saveGranteeList(args.publisher, remaining)
-
-    const history = await downloadHistory(this.opts.bee, args.historyRef)
-    await this.appendHistoryEntry(history, {
-      kvsRef,
-      metadata: { encryptedglref: bytesToHex(encryptedGlRef) },
-    })
-
-    return { historyRef: await uploadHistory(this.opts.bee, this.opts.stamp, history) }
-  }
-
-  async listGrantees(args: { publisher: Uint8Array; historyRef: Uint8Array }): Promise<Uint8Array[]> {
+  /**
+   * Retrieve the current grantee list.
+   * Mirrors bee-js's `getGrantees(ref)`.
+   */
+  async getGrantees(args: { publisher: Uint8Array; historyRef: Uint8Array }): Promise<Uint8Array[]> {
     const history = await downloadHistory(this.opts.bee, args.historyRef)
     const entry = lookupHistory(history, Math.floor(Date.now() / 1000))
     if (!entry) return []
