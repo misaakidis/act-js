@@ -1,0 +1,39 @@
+{
+  "name": "@nook/act-js",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Internal ACT library for Nook with Bee wire compatibility.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check:types": "tsc --noEmit",
+    "lint": "eslint src/ test/ --fix && prettier --write src/ test/",
+    "lint:check": "eslint src/ test/ && prettier --check src/ test/"
+  },
+  "peerDependencies": {
+    "@ethersphere/bee-js": "^11.1.1"
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.8.0",
+    "@noble/secp256k1": "^2.3.0"
+  },
+  "devDependencies": {
+    "@ethersphere/bee-js": "^11.1.1",
+    "@types/node": "^22.15.3",
+    "eslint": "^9.25.1",
+    "prettier": "^3.5.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "license": "BSD-3-Clause"
+}
