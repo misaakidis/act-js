@@ -15,6 +15,14 @@
 
 This repository is under active development and currently targets correctness and wire-compat behavior first.
 
+## API notes
+
+- `ActClient` now depends on a minimal data-client contract (`BeeDataClient`) rather than a concrete `Bee` class.
+  - A regular `bee-js` `Bee` instance is structurally compatible and works as-is.
+- `create()` returns `{ historyRef }` only.
+  - The access key is kept internal and derived/used inside client operations such as `encryptRef()` and `decryptRef()`.
+- Public method signatures use semantic byte aliases from `src/types.ts` (`PrivateKeyBytes`, `PublicKeyBytes`, `SwarmRef`) to make key/ref intent explicit.
+
 ## Development
 
 ```bash

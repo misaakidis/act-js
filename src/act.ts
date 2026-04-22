@@ -1,4 +1,4 @@
-import type { BatchId, Bee } from '@ethersphere/bee-js'
+import type { BatchId } from '@ethersphere/bee-js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils'
 import { decrypt, encrypt } from './crypto/cipher.js'
 import { deriveKvsKeys, deriveSessionKeys, ecdhX, publicKeyFromPrivate } from './crypto/ecdh.js'
@@ -12,35 +12,33 @@ import {
   uploadHistory,
 } from './history/history.js'
 import { createEmptyManifest, downloadKvs, manifestGet, manifestPut, uploadKvs } from './kvs/kvs.js'
+import type { BeeDataClient, HistoryResult, PrivateKeyBytes, PublicKeyBytes, SwarmRef } from './types.js'
 
 function randomAccessKey(): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(32))
 }
 
 export interface ActClientOptions {
-  bee: Bee
+  bee: BeeDataClient
   stamp: BatchId | string
 }
 
 export interface CreateArgs {
-  publisher: Uint8Array
-  grantees: Uint8Array[]
+  publisher: PrivateKeyBytes
+  grantees: PublicKeyBytes[]
 }
 
-export interface ActCreateResult {
-  historyRef: Uint8Array
-  accessKey: Uint8Array
-}
+export interface ActCreateResult extends HistoryResult {}
 
 export interface EncryptArgs {
-  publisher: Uint8Array
-  historyRef: Uint8Array
+  publisher: PrivateKeyBytes
+  historyRef: SwarmRef
 }
 
 export interface DecryptArgs {
-  granteePriv: Uint8Array
-  publisherPub: Uint8Array
-  historyRef: Uint8Array
+  granteePriv: PrivateKeyBytes
+  publisherPub: PublicKeyBytes
+  historyRef: SwarmRef
 }
 
 export class ActClient {
@@ -71,20 +69,20 @@ export class ActClient {
     })
 
     const historyRef = await uploadHistory(this.opts.bee, this.opts.stamp, history)
-    return { historyRef, accessKey }
+    return { historyRef }
   }
 
-  async encryptRef(ref: Uint8Array, args: EncryptArgs): Promise<Uint8Array> {
+  async encryptRef(ref: SwarmRef, args: EncryptArgs): Promise<SwarmRef> {
     const accessKey = await this.getAccessKeyAsPublisher(args.publisher, args.historyRef)
     return encrypt(ref, accessKey, 0)
   }
 
-  async reencryptRef(newRef: Uint8Array, args: DecryptArgs): Promise<Uint8Array> {
+  async reencryptRef(newRef: SwarmRef, args: DecryptArgs): Promise<SwarmRef> {
     const accessKey = await this.getAccessKeyAsGrantee(args.granteePriv, args.publisherPub, args.historyRef)
     return encrypt(newRef, accessKey, 0)
   }
 
-  async decryptRef(encRef: Uint8Array, args: DecryptArgs): Promise<Uint8Array> {
+  async decryptRef(encRef: SwarmRef, args: DecryptArgs): Promise<SwarmRef> {
     const accessKey = await this.getAccessKeyAsGrantee(args.granteePriv, args.publisherPub, args.historyRef)
     return decrypt(encRef, accessKey, 0)
   }
@@ -98,9 +96,9 @@ export class ActClient {
    * content encrypted after revocation.
    */
   async patchGrantees(
-    grantees: { add?: Uint8Array[]; revoke?: Uint8Array[] },
-    args: { publisher: Uint8Array; historyRef: Uint8Array },
-  ): Promise<{ historyRef: Uint8Array }> {
+    grantees: { add?: PublicKeyBytes[]; revoke?: PublicKeyBytes[] },
+    args: { publisher: PrivateKeyBytes; historyRef: SwarmRef },
+  ): Promise<HistoryResult> {
     const toAdd = grantees.add ?? []
     const toRevoke = grantees.revoke ?? []
     if (toAdd.length === 0 && toRevoke.length === 0) {
@@ -148,7 +146,7 @@ export class ActClient {
    * Retrieve the current grantee list.
    * Mirrors bee-js's `getGrantees(ref)`.
    */
-  async getGrantees(args: { publisher: Uint8Array; historyRef: Uint8Array }): Promise<Uint8Array[]> {
+  async getGrantees(args: { publisher: PrivateKeyBytes; historyRef: SwarmRef }): Promise<PublicKeyBytes[]> {
     const history = await downloadHistory(this.opts.bee, args.historyRef)
     const entry = lookupHistory(history, Math.floor(Date.now() / 1000))
     if (!entry) return []
@@ -169,7 +167,10 @@ export class ActClient {
    * Upload the plaintext grantee list to Swarm, then encrypt its 32-byte reference
    * with the publisher's self-ECDH key. This matches Bee's encryptRefForPublisher wire format.
    */
-  private async saveGranteeList(publisher: Uint8Array, grantees: Uint8Array[]): Promise<Uint8Array> {
+  private async saveGranteeList(
+    publisher: PrivateKeyBytes,
+    grantees: PublicKeyBytes[],
+  ): Promise<SwarmRef> {
     const plaintext = serializeGranteeList(grantees)
     const uploaded = await this.opts.bee.uploadData(this.opts.stamp, plaintext)
     const granteeRef = uploaded.reference.toUint8Array()
@@ -179,15 +180,18 @@ export class ActClient {
     return encrypt(granteeRef, publisherAKDec, 0)
   }
 
-  private async getAccessKeyAsPublisher(publisher: Uint8Array, historyRef: Uint8Array): Promise<Uint8Array> {
+  private async getAccessKeyAsPublisher(
+    publisher: PrivateKeyBytes,
+    historyRef: SwarmRef,
+  ): Promise<Uint8Array> {
     const publisherPub = publicKeyFromPrivate(publisher)
     return this.getAccessKeyAsGrantee(publisher, publisherPub, historyRef)
   }
 
   private async getAccessKeyAsGrantee(
-    granteePriv: Uint8Array,
-    publisherPub: Uint8Array,
-    historyRef: Uint8Array,
+    granteePriv: PrivateKeyBytes,
+    publisherPub: PublicKeyBytes,
+    historyRef: SwarmRef,
   ): Promise<Uint8Array> {
     const { lookupKey, accessKeyDecryptionKey } = deriveSessionKeys(granteePriv, publisherPub)
     const history = await downloadHistory(this.opts.bee, historyRef)
@@ -212,7 +216,7 @@ export class ActClient {
    */
   private async appendHistoryEntry(
     history: Awaited<ReturnType<typeof downloadHistory>>,
-    entry: { kvsRef: Uint8Array; metadata: Record<string, string> },
+    entry: { kvsRef: SwarmRef; metadata: Record<string, string> },
   ): Promise<void> {
     const entries = collectHistoryEntries(history)
     const usedTimestamps = new Set(entries.map(e => e.timestamp))

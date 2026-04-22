@@ -1,10 +1,11 @@
 import { MantarayNode, type BatchId, type Bee } from '@ethersphere/bee-js'
+import type { BeeDataClient, SwarmRef } from '../types.js'
 
 const MAX_INT64 = 9223372036854775807n
 
 export interface HistoryEntry {
   timestamp: number
-  kvsRef: Uint8Array
+  kvsRef: SwarmRef
   metadata: Record<string, string>
 }
 
@@ -51,11 +52,11 @@ export function lookupHistory(root: MantarayNode, atUnixSec: number): HistoryEnt
 }
 
 export async function uploadHistory(
-  bee: Bee,
+  bee: BeeDataClient,
   stamp: BatchId | string,
   root: MantarayNode,
-): Promise<Uint8Array> {
-  const result = await root.saveRecursively(bee, stamp)
+): Promise<SwarmRef> {
+  const result = await root.saveRecursively(bee as unknown as Bee, stamp)
   return result.reference.toUint8Array()
 }
 
@@ -63,8 +64,9 @@ export async function uploadHistory(
  * NOTE: This relies on bee-js Mantaray serialization being wire-compatible
  * with bee Go implementation. This is validated via integration tests.
  */
-export async function downloadHistory(bee: Bee, historyRef: Uint8Array): Promise<MantarayNode> {
-  const root = await MantarayNode.unmarshal(bee, historyRef)
-  await root.loadRecursively(bee)
+export async function downloadHistory(bee: BeeDataClient, historyRef: SwarmRef): Promise<MantarayNode> {
+  const mantarayBee = bee as unknown as Bee
+  const root = await MantarayNode.unmarshal(mantarayBee, historyRef)
+  await root.loadRecursively(mantarayBee)
   return root
 }
