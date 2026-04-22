@@ -31,6 +31,30 @@ export interface BeeDataClient {
   downloadData(reference: SwarmRef): Promise<ByteArrayLike>
 }
 
+/** A single ACT history entry at a given timestamp. */
+export interface HistoryEntryLike {
+  timestamp: number
+  kvsRef: SwarmRef
+  metadata: Record<string, string>
+}
+
+/**
+ * Storage-agnostic history snapshot used by ActClient.
+ * Implementations may carry extra backend-specific state internally.
+ */
+export interface HistorySnapshot {
+  entries: HistoryEntryLike[]
+}
+
+/** History persistence/lookup backend used by ActClient. */
+export interface HistoryStore {
+  createEmpty(): Promise<HistorySnapshot>
+  load(historyRef: SwarmRef): Promise<HistorySnapshot>
+  lookupAt(snapshot: HistorySnapshot, atUnixSec: number): HistoryEntryLike | null
+  append(snapshot: HistorySnapshot, entry: HistoryEntryLike): Promise<void>
+  save(snapshot: HistorySnapshot, stamp: BatchId | string): Promise<SwarmRef>
+}
+
 /** Result of an ACT operation that may advance history. */
 export interface HistoryResult {
   historyRef: SwarmRef
@@ -38,4 +62,41 @@ export interface HistoryResult {
 
 export interface ActError extends Error {
   code: 'NOT_FOUND' | 'INVALID_KEY' | 'DECRYPT_FAILED' | 'WIRE_MISMATCH'
+}
+
+/** Bee-style public key input accepted by wrapper methods. */
+export type PublicKeyInput = PublicKeyBytes | string
+
+/** Bee-style reference input accepted by wrapper methods. */
+export type ReferenceInput = SwarmRef | string
+
+export interface BeeClientWrapperGranteesResult {
+  status: number
+  statusText: string
+  ref: SwarmRef
+  historyref: SwarmRef
+}
+
+export interface BeeClientWrapperGetGranteesResult {
+  status: number
+  statusText: string
+  grantees: PublicKeyBytes[]
+}
+
+export interface BeeClientWrapperPatchGranteesArgs {
+  add?: PublicKeyInput[]
+  revoke?: PublicKeyInput[]
+}
+
+export interface BeeClientWrapperUploadOptions {
+  act?: boolean
+  actHistoryAddress?: ReferenceInput
+  [key: string]: unknown
+}
+
+export interface BeeClientWrapperDownloadOptions {
+  actPublisher?: PublicKeyInput
+  actHistoryAddress?: ReferenceInput
+  actTimestamp?: string | number
+  [key: string]: unknown
 }

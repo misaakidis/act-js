@@ -3,16 +3,17 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils'
 import { decrypt, encrypt } from './crypto/cipher.js'
 import { deriveKvsKeys, deriveSessionKeys, ecdhX, publicKeyFromPrivate } from './crypto/ecdh.js'
 import { containsPubkey, deserializeGranteeList, removePubkey, serializeGranteeList } from './grantee/grantee-list.js'
-import {
-  addHistoryEntry,
-  collectHistoryEntries,
-  createEmptyHistory,
-  downloadHistory,
-  lookupHistory,
-  uploadHistory,
-} from './history/history.js'
+import { SwarmHistoryStore } from './history/history.js'
 import { createEmptyManifest, downloadKvs, manifestGet, manifestPut, uploadKvs } from './kvs/kvs.js'
-import type { BeeDataClient, HistoryResult, PrivateKeyBytes, PublicKeyBytes, SwarmRef } from './types.js'
+import type {
+  BeeDataClient,
+  HistoryResult,
+  HistorySnapshot,
+  HistoryStore,
+  PrivateKeyBytes,
+  PublicKeyBytes,
+  SwarmRef,
+} from './types.js'
 
 function randomAccessKey(): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(32))
@@ -21,6 +22,7 @@ function randomAccessKey(): Uint8Array {
 export interface ActClientOptions {
   bee: BeeDataClient
   stamp: BatchId | string
+  historyStore?: HistoryStore
 }
 
 export interface CreateArgs {
@@ -42,7 +44,11 @@ export interface DecryptArgs {
 }
 
 export class ActClient {
-  constructor(private opts: ActClientOptions) {}
+  private readonly historyStore: HistoryStore
+
+  constructor(private opts: ActClientOptions) {
+    this.historyStore = opts.historyStore ?? new SwarmHistoryStore(opts.bee)
+  }
 
   async create(args: CreateArgs): Promise<ActCreateResult> {
     const accessKey = randomAccessKey()
@@ -62,13 +68,13 @@ export class ActClient {
     const kvsRef = await uploadKvs(this.opts.bee, this.opts.stamp, kvs)
     const encryptedGlRef = await this.saveGranteeList(args.publisher, allGrantees)
 
-    const history = createEmptyHistory()
+    const history = await this.historyStore.createEmpty()
     await this.appendHistoryEntry(history, {
       kvsRef,
       metadata: { encryptedglref: bytesToHex(encryptedGlRef) },
     })
 
-    const historyRef = await uploadHistory(this.opts.bee, this.opts.stamp, history)
+    const historyRef = await this.historyStore.save(history, this.opts.stamp)
     return { historyRef }
   }
 
@@ -133,13 +139,13 @@ export class ActClient {
     const kvsRef = await uploadKvs(this.opts.bee, this.opts.stamp, kvs)
     const encryptedGlRef = await this.saveGranteeList(args.publisher, next)
 
-    const history = await downloadHistory(this.opts.bee, args.historyRef)
+    const history = await this.historyStore.load(args.historyRef)
     await this.appendHistoryEntry(history, {
       kvsRef,
       metadata: { encryptedglref: bytesToHex(encryptedGlRef) },
     })
 
-    return { historyRef: await uploadHistory(this.opts.bee, this.opts.stamp, history) }
+    return { historyRef: await this.historyStore.save(history, this.opts.stamp) }
   }
 
   /**
@@ -147,8 +153,8 @@ export class ActClient {
    * Mirrors bee-js's `getGrantees(ref)`.
    */
   async getGrantees(args: { publisher: PrivateKeyBytes; historyRef: SwarmRef }): Promise<PublicKeyBytes[]> {
-    const history = await downloadHistory(this.opts.bee, args.historyRef)
-    const entry = lookupHistory(history, Math.floor(Date.now() / 1000))
+    const history = await this.historyStore.load(args.historyRef)
+    const entry = this.historyStore.lookupAt(history, Math.floor(Date.now() / 1000))
     if (!entry) return []
 
     const encGlRefHex = entry.metadata.encryptedglref
@@ -194,8 +200,8 @@ export class ActClient {
     historyRef: SwarmRef,
   ): Promise<Uint8Array> {
     const { lookupKey, accessKeyDecryptionKey } = deriveSessionKeys(granteePriv, publisherPub)
-    const history = await downloadHistory(this.opts.bee, historyRef)
-    const entry = lookupHistory(history, Math.floor(Date.now() / 1000))
+    const history = await this.historyStore.load(historyRef)
+    const entry = this.historyStore.lookupAt(history, Math.floor(Date.now() / 1000))
     if (!entry) throw new Error('ACT: no history entries')
 
     const kvs = await downloadKvs(this.opts.bee, entry.kvsRef)
@@ -215,16 +221,15 @@ export class ActClient {
    * rather than writing a future timestamp that would confuse history lookups.
    */
   private async appendHistoryEntry(
-    history: Awaited<ReturnType<typeof downloadHistory>>,
+    history: HistorySnapshot,
     entry: { kvsRef: SwarmRef; metadata: Record<string, string> },
   ): Promise<void> {
-    const entries = collectHistoryEntries(history)
-    const usedTimestamps = new Set(entries.map(e => e.timestamp))
+    const usedTimestamps = new Set(history.entries.map(e => e.timestamp))
 
     for (let attempt = 0; attempt < 10; attempt++) {
       const ts = Math.floor(Date.now() / 1000)
       if (!usedTimestamps.has(ts)) {
-        addHistoryEntry(history, { timestamp: ts, kvsRef: entry.kvsRef, metadata: entry.metadata })
+        await this.historyStore.append(history, { timestamp: ts, kvsRef: entry.kvsRef, metadata: entry.metadata })
         return
       }
       await new Promise(resolve => setTimeout(resolve, 1100))

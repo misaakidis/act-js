@@ -12,7 +12,8 @@ Unlike bee-js ACT — where a Bee node holds the private key and performs ACT op
 - KVS helpers based on SimpleManifest JSON structure.
 - History helpers built on Mantaray manifests with inverted timestamps.
 - `ActClient`: explicit, low-level ACT orchestration with full crypto control.
-- `BeeClientWrapper` _(planned)_: drop-in bee-js ACT facade with identical method signatures, allowing existing bee-js ACT callers to migrate to client-side key custody with minimal code changes.
+- `HistoryStore` abstraction for ACT history persistence (default backend: `SwarmHistoryStore`).
+- `BeeClientWrapper`: bee-js ACT-compatible wrapper (`createGrantees`, `getGrantees`, `patchGrantees`, ACT-aware `uploadData`/`downloadData`) for migrating existing call sites to client-side key custody.
 
 ## Trust model
 
@@ -45,5 +46,5 @@ npm test
 - `src/kvs`: ACT key-value storage helpers
 - `src/history`: history encoding and lookup
 - `src/act.ts`: explicit ACT orchestration (`ActClient`)
-- `src/bee-client-wrapper.ts` _(planned)_: bee-js-compatible facade (`BeeClientWrapper`)
+- `src/bee-client-wrapper.ts`: bee-js-compatible wrapper (`BeeClientWrapper`)
 - `test/`: unit and integration tests
