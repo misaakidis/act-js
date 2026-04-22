@@ -31,6 +31,12 @@ export interface BeeDataClient {
   downloadData(reference: SwarmRef): Promise<ByteArrayLike>
 }
 
+/** Minimal blob storage contract for ACT internals. */
+export interface BlobStore {
+  put(data: Uint8Array): Promise<SwarmRef>
+  get(reference: SwarmRef): Promise<Uint8Array>
+}
+
 /** A single ACT history entry at a given timestamp. */
 export interface HistoryEntryLike {
   timestamp: number

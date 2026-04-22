@@ -21,6 +21,11 @@ Unlike bee-js ACT — where a Bee node holds the private key and performs ACT op
 - Uses deterministic bee-style response metadata (`201 Created` for `createGrantees`, `200 OK` for `getGrantees`/`patchGrantees`).
 - `uploadData({ act: true })` defaults to strict mode: `actHistoryAddress` is required unless wrapper is created with `actUploadMode: 'compat'`.
 
+Architecture notes:
+- `ActClient` now separates deterministic ACT core logic from persistence boundaries.
+- Current shipped backends remain Swarm/Bee only (`SwarmHistoryStore` + Bee-backed blob/KVS paths).
+- Non-Swarm persistence adapters are intentionally future work.
+
 ## Trust model
 
 | Mode | Private key location | Who does ACT crypto |

@@ -1,12 +1,14 @@
 import type { BatchId } from '@ethersphere/bee-js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils'
+import { applyGranteePatch, buildAccessManifest, ensurePublisherIncluded } from './act-core.js'
 import { decrypt, encrypt } from './crypto/cipher.js'
 import { deriveKvsKeys, deriveSessionKeys, ecdhX, publicKeyFromPrivate } from './crypto/ecdh.js'
-import { containsPubkey, deserializeGranteeList, removePubkey, serializeGranteeList } from './grantee/grantee-list.js'
+import { deserializeGranteeList, serializeGranteeList } from './grantee/grantee-list.js'
 import { SwarmHistoryStore } from './history/history.js'
-import { createEmptyManifest, downloadKvs, manifestGet, manifestPut, uploadKvs } from './kvs/kvs.js'
+import { downloadKvs, manifestGet, uploadKvs } from './kvs/kvs.js'
 import type {
   BeeDataClient,
+  BlobStore,
   HistoryResult,
   HistorySnapshot,
   HistoryStore,
@@ -23,6 +25,7 @@ export interface ActClientOptions {
   bee: BeeDataClient
   stamp: BatchId | string
   historyStore?: HistoryStore
+  blobStore?: BlobStore
 }
 
 export interface CreateArgs {
@@ -45,25 +48,19 @@ export interface DecryptArgs {
 
 export class ActClient {
   private readonly historyStore: HistoryStore
+  private readonly blobStore: BlobStore
 
   constructor(private opts: ActClientOptions) {
     this.historyStore = opts.historyStore ?? new SwarmHistoryStore(opts.bee)
+    this.blobStore = opts.blobStore ?? new SwarmBlobStore(opts.bee, opts.stamp)
   }
 
   async create(args: CreateArgs): Promise<ActCreateResult> {
     const accessKey = randomAccessKey()
     const publisherPub = publicKeyFromPrivate(args.publisher)
 
-    // Bee always includes publisher as a grantee implicitly; mirror that behaviour.
-    const allGrantees = containsPubkey(args.grantees, publisherPub)
-      ? args.grantees
-      : [publisherPub, ...args.grantees]
-
-    const kvs = createEmptyManifest()
-    for (const granteePub of allGrantees) {
-      const { lookupKey, accessKeyDecryptionKey } = deriveSessionKeys(args.publisher, granteePub)
-      manifestPut(kvs, lookupKey, encrypt(accessKey, accessKeyDecryptionKey, 0))
-    }
+    const allGrantees = ensurePublisherIncluded(publisherPub, args.grantees)
+    const kvs = buildAccessManifest(args.publisher, allGrantees, accessKey)
 
     const kvsRef = await uploadKvs(this.opts.bee, this.opts.stamp, kvs)
     const encryptedGlRef = await this.saveGranteeList(args.publisher, allGrantees)
@@ -112,29 +109,14 @@ export class ActClient {
     }
 
     const currentGrantees = await this.getGrantees(args)
-    let next = currentGrantees
-
-    for (const pub of toAdd) {
-      if (!containsPubkey(next, pub)) {
-        next = [...next, pub]
-      }
-    }
-
-    const revoking = toRevoke.length > 0
-    for (const pub of toRevoke) {
-      next = removePubkey(next, pub)
-    }
+    const { nextGrantees: next, revoking } = applyGranteePatch(currentGrantees, { add: toAdd, revoke: toRevoke })
 
     // Only rotate the access key when revoking; adds can reuse the existing one.
     const accessKey = revoking
       ? randomAccessKey()
       : await this.getAccessKeyAsPublisher(args.publisher, args.historyRef)
 
-    const kvs = createEmptyManifest()
-    for (const pk of next) {
-      const { lookupKey, accessKeyDecryptionKey } = deriveSessionKeys(args.publisher, pk)
-      manifestPut(kvs, lookupKey, encrypt(accessKey, accessKeyDecryptionKey, 0))
-    }
+    const kvs = buildAccessManifest(args.publisher, next, accessKey)
 
     const kvsRef = await uploadKvs(this.opts.bee, this.opts.stamp, kvs)
     const encryptedGlRef = await this.saveGranteeList(args.publisher, next)
@@ -165,8 +147,8 @@ export class ActClient {
 
     // The stored value is the encrypted 32-byte Swarm reference to the plaintext list.
     const granteeRef = decrypt(hexToBytes(encGlRefHex), publisherAKDec, 0)
-    const plaintextBytes = await this.opts.bee.downloadData(granteeRef)
-    return deserializeGranteeList(plaintextBytes.toUint8Array())
+    const plaintextBytes = await this.blobStore.get(granteeRef)
+    return deserializeGranteeList(plaintextBytes)
   }
 
   /**
@@ -178,8 +160,7 @@ export class ActClient {
     grantees: PublicKeyBytes[],
   ): Promise<SwarmRef> {
     const plaintext = serializeGranteeList(grantees)
-    const uploaded = await this.opts.bee.uploadData(this.opts.stamp, plaintext)
-    const granteeRef = uploaded.reference.toUint8Array()
+    const granteeRef = await this.blobStore.put(plaintext)
 
     const publisherPub = publicKeyFromPrivate(publisher)
     const [, publisherAKDec] = deriveKvsKeys(ecdhX(publisher, publisherPub))
@@ -236,5 +217,22 @@ export class ActClient {
     }
 
     throw new Error('ACT: could not find a free timestamp slot after 10 attempts')
+  }
+}
+
+class SwarmBlobStore implements BlobStore {
+  constructor(
+    private readonly bee: BeeDataClient,
+    private readonly stamp: BatchId | string,
+  ) {}
+
+  async put(data: Uint8Array): Promise<SwarmRef> {
+    const uploaded = await this.bee.uploadData(this.stamp, data)
+    return uploaded.reference.toUint8Array()
+  }
+
+  async get(reference: SwarmRef): Promise<Uint8Array> {
+    const downloaded = await this.bee.downloadData(reference)
+    return downloaded.toUint8Array()
   }
 }
