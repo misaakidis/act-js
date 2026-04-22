@@ -35,7 +35,7 @@ describe('history', () => {
     const root = createEmptyHistory()
     addHistoryEntry(root, {
       timestamp: 1000,
-      kvsRef: new Uint8Array(32),
+      kvsRef: new Uint8Array(32).fill(1),
       metadata: { encryptedglref: 'abc123' },
     })
     const entries = collectHistoryEntries(root)

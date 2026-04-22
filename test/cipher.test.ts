@@ -29,10 +29,16 @@ describe('cipher', () => {
 })
 
 describe('cipher - fixtures', () => {
-  for (const fixture of fixtures) {
-    it(fixture.name, () => {
-      const ct = encrypt(hexToBytes(fixture.plaintext), hexToBytes(fixture.key), fixture.initCtr)
-      expect(bytesToHex(ct)).toBe(fixture.ciphertext)
+  if (fixtures.length === 0) {
+    it('has no fixtures yet', () => {
+      expect(fixtures).toEqual([])
     })
+  } else {
+    for (const fixture of fixtures) {
+      it(fixture.name, () => {
+        const ct = encrypt(hexToBytes(fixture.plaintext), hexToBytes(fixture.key), fixture.initCtr)
+        expect(bytesToHex(ct)).toBe(fixture.ciphertext)
+      })
+    }
   }
 })

@@ -11,9 +11,9 @@ describe.skipIf(!STAMP)('ActClient integration', () => {
     const bee = new Bee(BEE_URL)
     const act = new ActClient({ bee, stamp: STAMP! })
 
-    const creatorPriv = secp.utils.randomSecretKey()
+    const creatorPriv = secp.utils.randomPrivateKey()
     const creatorPub = secp.getPublicKey(creatorPriv, false)
-    const granteePriv = secp.utils.randomSecretKey()
+    const granteePriv = secp.utils.randomPrivateKey()
     const granteePub = secp.getPublicKey(granteePriv, false)
 
     const { historyRef } = await act.create({

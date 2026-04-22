@@ -8,7 +8,7 @@ import {
 } from '../src/grantee/grantee-list.js'
 
 describe('grantee-list', () => {
-  const pk = () => secp.getPublicKey(secp.utils.randomSecretKey(), false)
+  const pk = () => secp.getPublicKey(secp.utils.randomPrivateKey(), false)
 
   it('roundtrips a list', () => {
     const list = [pk(), pk(), pk()]
