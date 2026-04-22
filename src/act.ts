@@ -1,93 +1,133 @@
-import type { BatchId } from '@ethersphere/bee-js'
-import { bytesToHex, hexToBytes } from '@noble/hashes/utils'
-import { applyGranteePatch, buildAccessManifest, ensurePublisherIncluded } from './act-core.js'
-import { decrypt, encrypt } from './crypto/cipher.js'
-import { deriveKvsKeys, deriveSessionKeys, ecdhX, publicKeyFromPrivate } from './crypto/ecdh.js'
-import { deserializeGranteeList, serializeGranteeList } from './grantee/grantee-list.js'
-import { SwarmHistoryStore } from './history/history.js'
-import { downloadKvs, manifestGet, uploadKvs } from './kvs/kvs.js'
+import type { BatchId } from "@ethersphere/bee-js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils";
+import {
+  applyGranteePatch,
+  buildAccessManifest,
+  ensurePublisherIncluded,
+} from "./act-core.js";
+import { decrypt, encrypt } from "./crypto/cipher.js";
+import { deriveKvsKeys } from "./crypto/ecdh.js";
+import {
+  deserializeGranteeList,
+  serializeGranteeList,
+} from "./grantee/grantee-list.js";
+import { SwarmHistoryStore } from "./history/history.js";
+import { downloadKvs, manifestGet, uploadKvs } from "./kvs/kvs.js";
+import type { ActSigner } from "./signer.js";
 import type {
   BeeDataClient,
-  BlobStore,
   HistoryResult,
   HistorySnapshot,
   HistoryStore,
-  PrivateKeyBytes,
   PublicKeyBytes,
   SwarmRef,
-} from './types.js'
+} from "./types.js";
 
 function randomAccessKey(): Uint8Array {
-  return crypto.getRandomValues(new Uint8Array(32))
+  return crypto.getRandomValues(new Uint8Array(32));
 }
 
 export interface ActClientOptions {
-  bee: BeeDataClient
-  stamp: BatchId | string
-  historyStore?: HistoryStore
-  blobStore?: BlobStore
+  bee: BeeDataClient;
+  /** Postage batch. Required for writes (create, patchGrantees).
+   *  May be omitted for read-only clients that only call decryptRef. */
+  stamp?: BatchId | string;
+  historyStore?: HistoryStore;
 }
 
 export interface CreateArgs {
-  publisher: PrivateKeyBytes
-  grantees: PublicKeyBytes[]
+  signer: ActSigner;
+  grantees: PublicKeyBytes[];
 }
 
-export interface ActCreateResult extends HistoryResult {}
-
-export interface EncryptArgs {
-  publisher: PrivateKeyBytes
-  historyRef: SwarmRef
+export interface GranteeResult extends HistoryResult {
+  /** Swarm ref to the plaintext serialized grantee list (bee-js parity: `ref`). */
+  granteeListRef: SwarmRef;
 }
 
-export interface DecryptArgs {
-  granteePriv: PrivateKeyBytes
-  publisherPub: PublicKeyBytes
-  historyRef: SwarmRef
+export interface ActCreateResult extends GranteeResult {}
+
+export interface PublisherContextArgs {
+  signer: ActSigner;
+  historyRef: SwarmRef;
+}
+
+export interface GranteeContextArgs {
+  signer: ActSigner;
+  publisherPub: PublicKeyBytes;
+  historyRef: SwarmRef;
+  /** Unix seconds — select a past history entry (for reading content posted before revocation). */
+  atUnixSec?: number;
 }
 
 export class ActClient {
-  private readonly historyStore: HistoryStore
-  private readonly blobStore: BlobStore
+  private readonly historyStore: HistoryStore;
 
   constructor(private opts: ActClientOptions) {
-    this.historyStore = opts.historyStore ?? new SwarmHistoryStore(opts.bee)
-    this.blobStore = opts.blobStore ?? new SwarmBlobStore(opts.bee, opts.stamp)
+    this.historyStore = opts.historyStore ?? new SwarmHistoryStore(opts.bee);
   }
 
   async create(args: CreateArgs): Promise<ActCreateResult> {
-    const accessKey = randomAccessKey()
-    const publisherPub = publicKeyFromPrivate(args.publisher)
+    const stamp = this.requireStamp();
+    const accessKey = randomAccessKey();
+    const publisherPub = args.signer.publicKey();
 
-    const allGrantees = ensurePublisherIncluded(publisherPub, args.grantees)
-    const kvs = buildAccessManifest(args.publisher, allGrantees, accessKey)
+    const allGrantees = ensurePublisherIncluded(publisherPub, args.grantees);
+    const kvs = buildAccessManifest(args.signer, allGrantees, accessKey);
 
-    const kvsRef = await uploadKvs(this.opts.bee, this.opts.stamp, kvs)
-    const encryptedGlRef = await this.saveGranteeList(args.publisher, allGrantees)
+    const kvsRef = await uploadKvs(this.opts.bee, stamp, kvs);
+    const { granteeListRef, encryptedRef } = await this.saveGranteeList(
+      args.signer,
+      stamp,
+      allGrantees,
+    );
 
-    const history = await this.historyStore.createEmpty()
+    const history = await this.historyStore.createEmpty();
     await this.appendHistoryEntry(history, {
       kvsRef,
-      metadata: { encryptedglref: bytesToHex(encryptedGlRef) },
-    })
+      metadata: { encryptedglref: bytesToHex(encryptedRef) },
+    });
 
-    const historyRef = await this.historyStore.save(history, this.opts.stamp)
-    return { historyRef }
+    const historyRef = await this.historyStore.save(history, stamp);
+    return { historyRef, granteeListRef };
   }
 
-  async encryptRef(ref: SwarmRef, args: EncryptArgs): Promise<SwarmRef> {
-    const accessKey = await this.getAccessKeyAsPublisher(args.publisher, args.historyRef)
-    return encrypt(ref, accessKey, 0)
+  async encryptRef(
+    ref: SwarmRef,
+    args: PublisherContextArgs,
+  ): Promise<SwarmRef> {
+    const accessKey = await this.getAccessKey(
+      args.signer,
+      args.signer.publicKey(),
+      args.historyRef,
+    );
+    return encrypt(ref, accessKey, 0);
   }
 
-  async reencryptRef(newRef: SwarmRef, args: DecryptArgs): Promise<SwarmRef> {
-    const accessKey = await this.getAccessKeyAsGrantee(args.granteePriv, args.publisherPub, args.historyRef)
-    return encrypt(newRef, accessKey, 0)
+  async reencryptRef(
+    newRef: SwarmRef,
+    args: GranteeContextArgs,
+  ): Promise<SwarmRef> {
+    const accessKey = await this.getAccessKey(
+      args.signer,
+      args.publisherPub,
+      args.historyRef,
+      args.atUnixSec,
+    );
+    return encrypt(newRef, accessKey, 0);
   }
 
-  async decryptRef(encRef: SwarmRef, args: DecryptArgs): Promise<SwarmRef> {
-    const accessKey = await this.getAccessKeyAsGrantee(args.granteePriv, args.publisherPub, args.historyRef)
-    return decrypt(encRef, accessKey, 0)
+  async decryptRef(
+    encRef: SwarmRef,
+    args: GranteeContextArgs,
+  ): Promise<SwarmRef> {
+    const accessKey = await this.getAccessKey(
+      args.signer,
+      args.publisherPub,
+      args.historyRef,
+      args.atUnixSec,
+    );
+    return decrypt(encRef, accessKey, 0);
   }
 
   /**
@@ -100,55 +140,80 @@ export class ActClient {
    */
   async patchGrantees(
     grantees: { add?: PublicKeyBytes[]; revoke?: PublicKeyBytes[] },
-    args: { publisher: PrivateKeyBytes; historyRef: SwarmRef },
-  ): Promise<HistoryResult> {
-    const toAdd = grantees.add ?? []
-    const toRevoke = grantees.revoke ?? []
+    args: PublisherContextArgs,
+  ): Promise<GranteeResult> {
+    const stamp = this.requireStamp();
+    const toAdd = grantees.add ?? [];
+    const toRevoke = grantees.revoke ?? [];
     if (toAdd.length === 0 && toRevoke.length === 0) {
-      return { historyRef: args.historyRef }
+      const current = await this.getGrantees(args);
+      const { granteeListRef } = await this.saveGranteeList(
+        args.signer,
+        stamp,
+        current,
+      );
+      return { historyRef: args.historyRef, granteeListRef };
     }
 
-    const currentGrantees = await this.getGrantees(args)
-    const { nextGrantees: next, revoking } = applyGranteePatch(currentGrantees, { add: toAdd, revoke: toRevoke })
+    const currentGrantees = await this.getGrantees(args);
+    const { nextGrantees: next, revoking } = applyGranteePatch(
+      currentGrantees,
+      { add: toAdd, revoke: toRevoke },
+    );
 
     // Only rotate the access key when revoking; adds can reuse the existing one.
     const accessKey = revoking
       ? randomAccessKey()
-      : await this.getAccessKeyAsPublisher(args.publisher, args.historyRef)
+      : await this.getAccessKey(
+          args.signer,
+          args.signer.publicKey(),
+          args.historyRef,
+        );
 
-    const kvs = buildAccessManifest(args.publisher, next, accessKey)
+    const kvs = buildAccessManifest(args.signer, next, accessKey);
 
-    const kvsRef = await uploadKvs(this.opts.bee, this.opts.stamp, kvs)
-    const encryptedGlRef = await this.saveGranteeList(args.publisher, next)
+    const kvsRef = await uploadKvs(this.opts.bee, stamp, kvs);
+    const { granteeListRef, encryptedRef } = await this.saveGranteeList(
+      args.signer,
+      stamp,
+      next,
+    );
 
-    const history = await this.historyStore.load(args.historyRef)
+    const history = await this.historyStore.load(args.historyRef);
     await this.appendHistoryEntry(history, {
       kvsRef,
-      metadata: { encryptedglref: bytesToHex(encryptedGlRef) },
-    })
+      metadata: { encryptedglref: bytesToHex(encryptedRef) },
+    });
 
-    return { historyRef: await this.historyStore.save(history, this.opts.stamp) }
+    return {
+      historyRef: await this.historyStore.save(history, stamp),
+      granteeListRef,
+    };
   }
 
   /**
    * Retrieve the current grantee list.
    * Mirrors bee-js's `getGrantees(ref)`.
    */
-  async getGrantees(args: { publisher: PrivateKeyBytes; historyRef: SwarmRef }): Promise<PublicKeyBytes[]> {
-    const history = await this.historyStore.load(args.historyRef)
-    const entry = this.historyStore.lookupAt(history, Math.floor(Date.now() / 1000))
-    if (!entry) return []
+  async getGrantees(args: PublisherContextArgs): Promise<PublicKeyBytes[]> {
+    const history = await this.historyStore.load(args.historyRef);
+    const entry = this.historyStore.lookupAt(
+      history,
+      Math.floor(Date.now() / 1000),
+    );
+    if (!entry) return [];
 
-    const encGlRefHex = entry.metadata.encryptedglref
-    if (!encGlRefHex) return []
+    const encGlRefHex = entry.metadata.encryptedglref;
+    if (!encGlRefHex) return [];
 
-    const publisherPub = publicKeyFromPrivate(args.publisher)
-    const [, publisherAKDec] = deriveKvsKeys(ecdhX(args.publisher, publisherPub))
+    const [, publisherAKDec] = deriveKvsKeys(
+      args.signer.ecdhSharedX(args.signer.publicKey()),
+    );
 
     // The stored value is the encrypted 32-byte Swarm reference to the plaintext list.
-    const granteeRef = decrypt(hexToBytes(encGlRefHex), publisherAKDec, 0)
-    const plaintextBytes = await this.blobStore.get(granteeRef)
-    return deserializeGranteeList(plaintextBytes)
+    const granteeRef = decrypt(hexToBytes(encGlRefHex), publisherAKDec, 0);
+    const plaintextBytes = await this.opts.bee.downloadData(granteeRef);
+    return deserializeGranteeList(plaintextBytes.toUint8Array());
   }
 
   /**
@@ -156,83 +221,88 @@ export class ActClient {
    * with the publisher's self-ECDH key. This matches Bee's encryptRefForPublisher wire format.
    */
   private async saveGranteeList(
-    publisher: PrivateKeyBytes,
+    signer: ActSigner,
+    stamp: BatchId | string,
     grantees: PublicKeyBytes[],
-  ): Promise<SwarmRef> {
-    const plaintext = serializeGranteeList(grantees)
-    const granteeRef = await this.blobStore.put(plaintext)
+  ): Promise<{ granteeListRef: SwarmRef; encryptedRef: SwarmRef }> {
+    const plaintext = serializeGranteeList(grantees);
+    const uploaded = await this.opts.bee.uploadData(stamp, plaintext);
+    const granteeListRef = uploaded.reference.toUint8Array();
 
-    const publisherPub = publicKeyFromPrivate(publisher)
-    const [, publisherAKDec] = deriveKvsKeys(ecdhX(publisher, publisherPub))
-    return encrypt(granteeRef, publisherAKDec, 0)
+    const [, publisherAKDec] = deriveKvsKeys(
+      signer.ecdhSharedX(signer.publicKey()),
+    );
+    return {
+      granteeListRef,
+      encryptedRef: encrypt(granteeListRef, publisherAKDec, 0),
+    };
   }
 
-  private async getAccessKeyAsPublisher(
-    publisher: PrivateKeyBytes,
-    historyRef: SwarmRef,
-  ): Promise<Uint8Array> {
-    const publisherPub = publicKeyFromPrivate(publisher)
-    return this.getAccessKeyAsGrantee(publisher, publisherPub, historyRef)
+  private requireStamp(): BatchId | string {
+    if (this.opts.stamp === undefined) {
+      throw new Error("ACT: stamp required for write operations");
+    }
+    return this.opts.stamp;
   }
 
-  private async getAccessKeyAsGrantee(
-    granteePriv: PrivateKeyBytes,
+  private async getAccessKey(
+    signer: ActSigner,
     publisherPub: PublicKeyBytes,
     historyRef: SwarmRef,
+    atUnixSec?: number,
   ): Promise<Uint8Array> {
-    const { lookupKey, accessKeyDecryptionKey } = deriveSessionKeys(granteePriv, publisherPub)
-    const history = await this.historyStore.load(historyRef)
-    const entry = this.historyStore.lookupAt(history, Math.floor(Date.now() / 1000))
-    if (!entry) throw new Error('ACT: no history entries')
+    const [lookupKey, accessKeyDecryptionKey] = deriveKvsKeys(
+      signer.ecdhSharedX(publisherPub),
+    );
+    const history = await this.historyStore.load(historyRef);
+    const entry = this.historyStore.lookupAt(
+      history,
+      atUnixSec ?? Math.floor(Date.now() / 1000),
+    );
+    if (!entry) throw new Error("ACT: no history entries");
 
-    const kvs = await downloadKvs(this.opts.bee, entry.kvsRef)
-    const encAccessKey = manifestGet(kvs, lookupKey)
+    const kvs = await downloadKvs(this.opts.bee, entry.kvsRef);
+    const encAccessKey = manifestGet(kvs, lookupKey);
     if (!encAccessKey) {
-      const err = new Error('NOT_FOUND: grantee not present in KVS') as Error & { code?: string }
-      err.code = 'NOT_FOUND'
-      throw err
+      const err = new Error(
+        "NOT_FOUND: grantee not present in KVS",
+      ) as Error & { code?: string };
+      err.code = "NOT_FOUND";
+      throw err;
     }
 
-    return decrypt(encAccessKey, accessKeyDecryptionKey, 0)
+    return decrypt(encAccessKey, accessKeyDecryptionKey, 0);
   }
 
   /**
-   * Add a history entry with the current second as timestamp.
-   * If that second is already occupied (e.g. two rapid calls), wait 1 s and retry
-   * rather than writing a future timestamp that would confuse history lookups.
+   * Append a history entry stamped with the current second.
+   *
+   * Must not produce a future-dated timestamp: callers decrypt at
+   * `Date.now()/1000`, and an entry dated ahead of wall-clock would be
+   * invisible — allowing a just-revoked grantee to keep access until the
+   * clock catches up. When a same-second collision occurs (two rapid
+   * operations), sleep until the clock advances past the most recent entry
+   * so the new entry gets a real timestamp strictly greater than all prior
+   * entries and no later than `Date.now()/1000`.
    */
   private async appendHistoryEntry(
     history: HistorySnapshot,
     entry: { kvsRef: SwarmRef; metadata: Record<string, string> },
   ): Promise<void> {
-    const usedTimestamps = new Set(history.entries.map(e => e.timestamp))
-
-    for (let attempt = 0; attempt < 10; attempt++) {
-      const ts = Math.floor(Date.now() / 1000)
-      if (!usedTimestamps.has(ts)) {
-        await this.historyStore.append(history, { timestamp: ts, kvsRef: entry.kvsRef, metadata: entry.metadata })
-        return
-      }
-      await new Promise(resolve => setTimeout(resolve, 1100))
+    const maxExisting = history.entries.reduce(
+      (m, e) => (e.timestamp > m ? e.timestamp : m),
+      -Infinity,
+    );
+    let ts = Math.floor(Date.now() / 1000);
+    while (ts <= maxExisting) {
+      const waitMs = (maxExisting - ts + 1) * 1000 + 50;
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      ts = Math.floor(Date.now() / 1000);
     }
-
-    throw new Error('ACT: could not find a free timestamp slot after 10 attempts')
-  }
-}
-
-class SwarmBlobStore implements BlobStore {
-  constructor(
-    private readonly bee: BeeDataClient,
-    private readonly stamp: BatchId | string,
-  ) {}
-
-  async put(data: Uint8Array): Promise<SwarmRef> {
-    const uploaded = await this.bee.uploadData(this.stamp, data)
-    return uploaded.reference.toUint8Array()
-  }
-
-  async get(reference: SwarmRef): Promise<Uint8Array> {
-    const downloaded = await this.bee.downloadData(reference)
-    return downloaded.toUint8Array()
+    await this.historyStore.append(history, {
+      timestamp: ts,
+      kvsRef: entry.kvsRef,
+      metadata: entry.metadata,
+    });
   }
 }
