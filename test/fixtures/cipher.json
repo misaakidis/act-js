@@ -1,1 +1,37 @@
-[]
+[
+  {
+    "name": "act-ref-encryption-v0",
+    "key": "8abf1502f557f15026716030fb6384792583daf39608a3cd02ff2f47e9bc6e49",
+    "initCtr": 0,
+    "plaintext": "39a5ea87b141fe44aa609c3327ecd896c0e2122897f5f4bbacf74db1033c5559",
+    "ciphertext": "0c846d288bc5c3a86c5c7095eced32af1b2d65e2675d03be593440e473789bb5"
+  },
+  {
+    "name": "all-zero-single-block",
+    "key": "8abf1502f557f15026716030fb6384792583daf39608a3cd02ff2f47e9bc6e49",
+    "initCtr": 0,
+    "plaintext": "0000000000000000000000000000000000000000000000000000000000000000",
+    "ciphertext": "352187af3a843decc63ceca6cb01ea39dbcf77caf0a8f705f5c30d557044ceec"
+  },
+  {
+    "name": "all-ff-single-block",
+    "key": "8abf1502f557f15026716030fb6384792583daf39608a3cd02ff2f47e9bc6e49",
+    "initCtr": 0,
+    "plaintext": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "ciphertext": "cade7850c57bc21339c3135934fe15c6243088350f5708fa0a3cf2aa8fbb3113"
+  },
+  {
+    "name": "multi-block-64b",
+    "key": "8abf1502f557f15026716030fb6384792583daf39608a3cd02ff2f47e9bc6e49",
+    "initCtr": 0,
+    "plaintext": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeffffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100",
+    "ciphertext": "3530a59c7ed15b9b4ea5461d07dc04c6dbde55f9b4fd91727d5aa7eebc9920136c7c6486c29df6962b7698483c0889e5cad52fe7850e64241111bb110ece082e"
+  },
+  {
+    "name": "single-block-initctr-7",
+    "key": "8abf1502f557f15026716030fb6384792583daf39608a3cd02ff2f47e9bc6e49",
+    "initCtr": 7,
+    "plaintext": "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff",
+    "ciphertext": "5f4d551b258cb0fd3e01d0756842d28987372ff5ec25382c3527513bf5fc114a"
+  }
+]

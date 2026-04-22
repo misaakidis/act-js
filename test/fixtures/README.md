@@ -1,5 +1,5 @@
 # Fixtures
 
-This directory holds Bee-generated fixture vectors for ACT wire-compat checks.
+This directory holds fixture vectors generated from Bee's Go ACT implementation.
 
-`cipher.json` and `ecdh.json` are currently placeholders and should be populated using the generation instructions in `test/gen/README.md`.
+Regenerate them using the scripts in `test/gen/` and instructions in `test/gen/README.md`.

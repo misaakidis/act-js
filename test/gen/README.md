@@ -1,23 +1,21 @@
 # Fixture Regeneration
 
-Use small Go helpers against the Bee repo to regenerate wire fixtures.
+Use the Go helpers in this directory against a local Bee repository checkout to regenerate wire fixtures.
+
+Set `BEE_REPO` to your Bee checkout path, then run:
+
+```bash
+export BEE_REPO=/path/to/bee
+```
 
 ## Cipher fixtures
 
-1. Create `test/gen/cipher_fixtures.go` in this repository.
-2. Run:
-
 ```bash
-cd ../bee
-go run ../act-js/test/gen/cipher_fixtures.go > ../act-js/test/fixtures/cipher.json
+(cd "$BEE_REPO" && go run ../act-js/test/gen/cipher_fixtures.go) > test/fixtures/cipher.json
 ```
 
 ## ECDH fixtures
 
-1. Create `test/gen/ecdh_fixtures.go` in this repository.
-2. Run:
-
 ```bash
-cd ../bee
-go run ../act-js/test/gen/ecdh_fixtures.go > ../act-js/test/fixtures/ecdh.json
+(cd "$BEE_REPO" && go run ../act-js/test/gen/ecdh_fixtures.go) > test/fixtures/ecdh.json
 ```
