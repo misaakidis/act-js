@@ -91,6 +91,7 @@ export interface BeeClientWrapperPatchGranteesArgs {
 export interface BeeClientWrapperUploadOptions {
   act?: boolean
   actHistoryAddress?: ReferenceInput
+  requestOptions?: unknown
   [key: string]: unknown
 }
 
@@ -98,5 +99,8 @@ export interface BeeClientWrapperDownloadOptions {
   actPublisher?: PublicKeyInput
   actHistoryAddress?: ReferenceInput
   actTimestamp?: string | number
+  requestOptions?: unknown
   [key: string]: unknown
 }
+
+export type BeeClientWrapperActUploadMode = 'strict' | 'compat'

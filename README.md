@@ -15,6 +15,12 @@ Unlike bee-js ACT — where a Bee node holds the private key and performs ACT op
 - `HistoryStore` abstraction for ACT history persistence (default backend: `SwarmHistoryStore`).
 - `BeeClientWrapper`: bee-js ACT-compatible wrapper (`createGrantees`, `getGrantees`, `patchGrantees`, ACT-aware `uploadData`/`downloadData`) for migrating existing call sites to client-side key custody.
 
+`BeeClientWrapper` parity notes:
+- Accepts bee-style `requestOptions` via wrapper methods/options and forwards them to underlying Bee data calls.
+- Enforces `reference`/`history` consistency in `patchGrantees` to avoid silent mismatches.
+- Uses deterministic bee-style response metadata (`201 Created` for `createGrantees`, `200 OK` for `getGrantees`/`patchGrantees`).
+- `uploadData({ act: true })` defaults to strict mode: `actHistoryAddress` is required unless wrapper is created with `actUploadMode: 'compat'`.
+
 ## Trust model
 
 | Mode | Private key location | Who does ACT crypto |

@@ -8,6 +8,7 @@ import { deserializeGranteeList } from './grantee/grantee-list.js'
 import { SwarmHistoryStore } from './history/history.js'
 import { downloadKvs, manifestGet } from './kvs/kvs.js'
 import type {
+  BeeClientWrapperActUploadMode,
   BeeClientWrapperDownloadOptions,
   BeeClientWrapperGetGranteesResult,
   BeeClientWrapperGranteesResult,
@@ -29,63 +30,77 @@ type BeeClientWithOptions = BeeDataClient & {
     stamp: BatchId | Uint8Array | string,
     data: Uint8Array,
     options?: Record<string, unknown>,
+    requestOptions?: unknown,
   ): Promise<UploadDataResultLike>
-  downloadData(reference: SwarmRef, options?: Record<string, unknown>): Promise<ByteArrayLike>
+  downloadData(reference: SwarmRef, options?: Record<string, unknown>, requestOptions?: unknown): Promise<ByteArrayLike>
 }
 
 export interface BeeClientWrapperOptions {
   bee: BeeClientWithOptions
   identityPrivKey: PrivateKeyBytes
   historyStore?: HistoryStore
+  actUploadMode?: BeeClientWrapperActUploadMode
 }
 
 export class BeeClientWrapper {
   private readonly publisherPub: PublicKeyBytes
-  private readonly historyStore: HistoryStore
+  private readonly historyStoreFactory: (requestOptions?: unknown) => HistoryStore
+  private readonly actUploadMode: BeeClientWrapperActUploadMode
   private currentHistoryRef: SwarmRef | null = null
+  private readonly refHistoryMap = new Map<string, string>()
 
   constructor(private readonly opts: BeeClientWrapperOptions) {
     this.publisherPub = publicKeyFromPrivate(opts.identityPrivKey)
-    this.historyStore = opts.historyStore ?? new SwarmHistoryStore(opts.bee)
+    this.historyStoreFactory =
+      opts.historyStore !== undefined
+        ? () => opts.historyStore!
+        : requestOptions => new SwarmHistoryStore(this.withRequestOptions(requestOptions))
+    this.actUploadMode = opts.actUploadMode ?? 'strict'
   }
 
   async createGrantees(
     postageBatchId: BatchId | Uint8Array | string,
     grantees: PublicKeyInput[],
-    _requestOptions?: unknown,
+    requestOptions?: unknown,
   ): Promise<BeeClientWrapperGranteesResult> {
-    const act = this.makeActClient(postageBatchId)
+    const act = this.makeActClient(postageBatchId, requestOptions)
     const normalized = grantees.map(normalizePublicKey)
     const { historyRef } = await act.create({ publisher: this.opts.identityPrivKey, grantees: normalized })
-    const ref = await this.resolveGranteeRefAt(historyRef, nowSec())
+    const ref = await this.resolveGranteeRefAt(historyRef, nowSec(), requestOptions)
     this.currentHistoryRef = historyRef
+    this.cacheRefHistory(ref, historyRef)
 
     return {
-      status: 201,
-      statusText: 'Created',
+      ...responseMeta(201, 'Created'),
       ref,
       historyref: historyRef,
     }
   }
 
-  async getGrantees(reference: ReferenceInput, _requestOptions?: unknown): Promise<BeeClientWrapperGetGranteesResult> {
-    const data = await this.opts.bee.downloadData(normalizeRef(reference))
+  async getGrantees(reference: ReferenceInput, requestOptions?: unknown): Promise<BeeClientWrapperGetGranteesResult> {
+    const data = await this.opts.bee.downloadData(normalizeRef(reference), undefined, requestOptions)
     return {
-      status: 200,
-      statusText: 'OK',
+      ...responseMeta(200, 'OK'),
       grantees: deserializeGranteeList(data.toUint8Array()),
     }
   }
 
   async patchGrantees(
     postageBatchId: BatchId | Uint8Array | string,
-    _reference: ReferenceInput,
+    reference: ReferenceInput,
     history: ReferenceInput,
     grantees: BeeClientWrapperPatchGranteesArgs,
-    _requestOptions?: unknown,
+    requestOptions?: unknown,
   ): Promise<BeeClientWrapperGranteesResult> {
+    const providedRef = normalizeRef(reference)
     const historyRef = normalizeRef(history)
-    const act = this.makeActClient(postageBatchId)
+    this.validateRefHistoryPair(providedRef, historyRef)
+    const expectedRef = await this.resolveGranteeRefAt(historyRef, nowSec(), requestOptions)
+    if (!bytesEqual(providedRef, expectedRef)) {
+      throw new Error('ACT: reference does not match history state')
+    }
+
+    const act = this.makeActClient(postageBatchId, requestOptions)
     const { historyRef: newHistoryRef } = await act.patchGrantees(
       {
         add: grantees.add?.map(normalizePublicKey),
@@ -94,11 +109,11 @@ export class BeeClientWrapper {
       { publisher: this.opts.identityPrivKey, historyRef },
     )
 
-    const ref = await this.resolveGranteeRefAt(newHistoryRef, nowSec())
+    const ref = await this.resolveGranteeRefAt(newHistoryRef, nowSec(), requestOptions)
     this.currentHistoryRef = newHistoryRef
+    this.cacheRefHistory(ref, newHistoryRef)
     return {
-      status: 200,
-      statusText: 'OK',
+      ...responseMeta(200, 'OK'),
       ref,
       historyref: newHistoryRef,
     }
@@ -110,8 +125,9 @@ export class BeeClientWrapper {
     options?: BeeClientWrapperUploadOptions,
   ): Promise<UploadDataResultLike & { historyAddress: SwarmRef | null }> {
     const needsAct = Boolean(options?.act || options?.actHistoryAddress)
+    const requestOptions = options?.requestOptions
     if (!needsAct) {
-      const uploaded = await this.opts.bee.uploadData(postageBatchId, data, stripActUploadOptions(options))
+      const uploaded = await this.opts.bee.uploadData(postageBatchId, data, stripActUploadOptions(options), requestOptions)
       return { ...uploaded, historyAddress: null }
     }
 
@@ -119,32 +135,42 @@ export class BeeClientWrapper {
       ? normalizeRef(options.actHistoryAddress)
       : this.currentHistoryRef
 
-    if (!historyRef) {
-      // Mirror Bee's "act: true" convenience when no history is provided.
-      const act = this.makeActClient(postageBatchId)
+    if (!historyRef && this.actUploadMode === 'strict') {
+      throw new Error('ACT: actHistoryAddress is required when act=true in strict mode')
+    }
+
+    if (!historyRef && this.actUploadMode === 'compat') {
+      // Compatibility mode mirrors a convenience flow by creating history on first ACT upload.
+      const act = this.makeActClient(postageBatchId, requestOptions)
       const created = await act.create({ publisher: this.opts.identityPrivKey, grantees: [this.publisherPub] })
       historyRef = created.historyRef
       this.currentHistoryRef = historyRef
     }
 
-    const uploaded = await this.opts.bee.uploadData(postageBatchId, data, stripActUploadOptions(options))
-    const act = this.makeActClient(postageBatchId)
+    const uploaded = await this.opts.bee.uploadData(
+      postageBatchId,
+      data,
+      stripActUploadOptions(options),
+      requestOptions,
+    )
+    const act = this.makeActClient(postageBatchId, requestOptions)
     const encryptedRef = await act.encryptRef(uploaded.reference.toUint8Array(), {
       publisher: this.opts.identityPrivKey,
-      historyRef,
+      historyRef: historyRef!,
     })
 
     return {
       ...uploaded,
       reference: toByteArrayLike(encryptedRef),
-      historyAddress: historyRef,
+      historyAddress: historyRef!,
     }
   }
 
   async downloadData(reference: ReferenceInput, options?: BeeClientWrapperDownloadOptions): Promise<ByteArrayLike> {
     const needsAct = Boolean(options?.actPublisher || options?.actHistoryAddress || options?.actTimestamp !== undefined)
+    const requestOptions = options?.requestOptions
     if (!needsAct) {
-      return this.opts.bee.downloadData(normalizeRef(reference), stripActDownloadOptions(options))
+      return this.opts.bee.downloadData(normalizeRef(reference), stripActDownloadOptions(options), requestOptions)
     }
 
     const historyRef = options?.actHistoryAddress
@@ -158,17 +184,22 @@ export class BeeClientWrapper {
       ? normalizePublicKey(options.actPublisher)
       : this.publisherPub
     const at = parseActTimestamp(options?.actTimestamp)
-    const plainRef = await this.decryptRefAtTimestamp(normalizeRef(reference), historyRef, publisherPub, at)
-    return this.opts.bee.downloadData(plainRef, stripActDownloadOptions(options))
+    const plainRef = await this.decryptRefAtTimestamp(normalizeRef(reference), historyRef, publisherPub, at, requestOptions)
+    return this.opts.bee.downloadData(plainRef, stripActDownloadOptions(options), requestOptions)
   }
 
-  private makeActClient(stamp: BatchId | Uint8Array | string): ActClient {
-    return new ActClient({ bee: this.opts.bee, stamp: normalizeStamp(stamp), historyStore: this.historyStore })
+  private makeActClient(stamp: BatchId | Uint8Array | string, requestOptions?: unknown): ActClient {
+    return new ActClient({
+      bee: this.withRequestOptions(requestOptions),
+      stamp: normalizeStamp(stamp),
+      historyStore: this.historyStoreFactory(requestOptions),
+    })
   }
 
-  private async resolveGranteeRefAt(historyRef: SwarmRef, atUnixSec: number): Promise<SwarmRef> {
-    const history = await this.historyStore.load(historyRef)
-    const entry = this.historyStore.lookupAt(history, atUnixSec)
+  private async resolveGranteeRefAt(historyRef: SwarmRef, atUnixSec: number, requestOptions?: unknown): Promise<SwarmRef> {
+    const historyStore = this.historyStoreFactory(requestOptions)
+    const history = await historyStore.load(historyRef)
+    const entry = historyStore.lookupAt(history, atUnixSec)
     if (!entry) throw new Error('ACT: no history entries')
     const encGlRefHex = entry.metadata.encryptedglref
     if (!encGlRefHex) throw new Error('ACT: missing encrypted grantee list reference')
@@ -182,13 +213,15 @@ export class BeeClientWrapper {
     historyRef: SwarmRef,
     publisherPub: PublicKeyBytes,
     atUnixSec: number,
+    requestOptions?: unknown,
   ): Promise<SwarmRef> {
-    const history = await this.historyStore.load(historyRef)
-    const entry = this.historyStore.lookupAt(history, atUnixSec)
+    const historyStore = this.historyStoreFactory(requestOptions)
+    const history = await historyStore.load(historyRef)
+    const entry = historyStore.lookupAt(history, atUnixSec)
     if (!entry) throw new Error('ACT: no history entries')
 
     const { lookupKey, accessKeyDecryptionKey } = deriveSessionKeys(this.opts.identityPrivKey, publisherPub)
-    const kvs = await downloadKvs(this.opts.bee, entry.kvsRef)
+    const kvs = await downloadKvs(this.withRequestOptions(requestOptions), entry.kvsRef)
     const encAccessKey = manifestGet(kvs, lookupKey)
     if (!encAccessKey) {
       const err = new Error('NOT_FOUND: grantee not present in KVS') as Error & { code?: string }
@@ -198,6 +231,29 @@ export class BeeClientWrapper {
 
     const accessKey = decrypt(encAccessKey, accessKeyDecryptionKey, 0)
     return decrypt(encryptedRef, accessKey, 0)
+  }
+
+  private withRequestOptions(requestOptions?: unknown): BeeDataClient {
+    if (requestOptions === undefined) {
+      return this.opts.bee
+    }
+
+    return {
+      uploadData: async (stamp, data) => this.opts.bee.uploadData(stamp, data, undefined, requestOptions),
+      downloadData: async reference => this.opts.bee.downloadData(reference, undefined, requestOptions),
+    }
+  }
+
+  private cacheRefHistory(ref: SwarmRef, historyRef: SwarmRef): void {
+    this.refHistoryMap.set(bytesToHex(ref), bytesToHex(historyRef))
+  }
+
+  private validateRefHistoryPair(ref: SwarmRef, historyRef: SwarmRef): void {
+    const expectedHistoryHex = this.refHistoryMap.get(bytesToHex(ref))
+    if (!expectedHistoryHex) return
+    if (expectedHistoryHex !== bytesToHex(historyRef)) {
+      throw new Error('ACT: reference/history mismatch')
+    }
   }
 }
 
@@ -219,6 +275,10 @@ function normalizeStamp(stamp: BatchId | Uint8Array | string): BatchId | string 
   if (typeof stamp === 'string') return stripHex(stamp)
   if (stamp instanceof Uint8Array) return bytesToHex(stamp)
   return stamp
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((v, i) => v === b[i])
 }
 
 function normalizeRef(input: ReferenceInput): SwarmRef {
@@ -258,6 +318,7 @@ function stripActUploadOptions(options?: BeeClientWrapperUploadOptions): Record<
   const out = { ...options }
   delete out.act
   delete out.actHistoryAddress
+  delete out.requestOptions
   return out
 }
 
@@ -267,5 +328,10 @@ function stripActDownloadOptions(options?: BeeClientWrapperDownloadOptions): Rec
   delete out.actPublisher
   delete out.actHistoryAddress
   delete out.actTimestamp
+  delete out.requestOptions
   return out
+}
+
+function responseMeta(status: number, statusText: string): { status: number; statusText: string } {
+  return { status, statusText }
 }
