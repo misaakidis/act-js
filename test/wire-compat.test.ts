@@ -43,6 +43,44 @@ describe.skipIf(!STAMP)("wire-compat", () => {
 
     expect(downloaded.toUint8Array()).toEqual(plaintext);
   });
+
+  it("act-js decrypts ACT-protected reference created by bee node", async () => {
+    const bee = new Bee(BEE_URL);
+
+    // Grantee holds a secp256k1 key pair locally. Bee-go is the publisher
+    // (its own node key) and manages the ACT server-side.
+    const granteePriv = secp.utils.randomPrivateKey();
+    const granteePubCompressed = secp.getPublicKey(granteePriv, true);
+
+    // 1. Bee-go creates the ACT server-side, granting access to our grantee.
+    const created = await bee.createGrantees(STAMP!, [granteePubCompressed]);
+
+    // 2. Bee-go uploads data under that ACT.
+    const plaintext = new TextEncoder().encode(
+      `reverse-wire-compat:${Date.now()}`,
+    );
+    const uploaded = await bee.uploadData(STAMP!, plaintext, {
+      act: true,
+      actHistoryAddress: created.historyref,
+    });
+    const encryptedRef = uploaded.reference.toUint8Array();
+    const historyRef = uploaded.historyAddress.getOrThrow().toUint8Array();
+
+    // 3. act-js, using only the grantee's key and the node's public key,
+    //    decrypts independently.
+    const nodePub64 = await resolveNodePublicKey64(bee);
+    const nodePub65 = toUncompressed65(nodePub64);
+
+    const act = new ActClient({ bee });
+    const plainRef = await act.decryptRef(encryptedRef, {
+      signer: rawKeySigner(granteePriv),
+      publisherPub: nodePub65,
+      historyRef,
+    });
+
+    const fetched = await bee.downloadData(plainRef);
+    expect(fetched.toUint8Array()).toEqual(plaintext);
+  });
 });
 
 async function resolveNodePublicKey64(bee: Bee): Promise<Uint8Array> {

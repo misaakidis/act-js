@@ -37,6 +37,10 @@ describe.skipIf(!STAMP)("ActBeeWrapper integration", () => {
     const tsBeforeRevoke = Math.floor(Date.now() / 1000);
     expect(oldUploaded.historyAddress).toEqual(created.historyref);
 
+    // Ensure the revoke entry lands in a strictly later second than
+    // tsBeforeRevoke so history lookup at tsBeforeRevoke can't resolve to it.
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+
     const patched = await creator.patchGrantees(
       STAMP!,
       created.ref,
