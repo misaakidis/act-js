@@ -48,19 +48,24 @@ export class ActClient {
 
   async create(args: CreateArgs): Promise<ActCreateResult> {
     const accessKey = randomAccessKey()
-    const kvs = createEmptyManifest()
+    const publisherPub = publicKeyFromPrivate(args.publisher)
 
-    for (const granteePub of args.grantees) {
+    // Bee always includes publisher as a grantee implicitly; mirror that behaviour.
+    const allGrantees = containsPubkey(args.grantees, publisherPub)
+      ? args.grantees
+      : [publisherPub, ...args.grantees]
+
+    const kvs = createEmptyManifest()
+    for (const granteePub of allGrantees) {
       const { lookupKey, accessKeyDecryptionKey } = deriveSessionKeys(args.publisher, granteePub)
       manifestPut(kvs, lookupKey, encrypt(accessKey, accessKeyDecryptionKey, 0))
     }
 
     const kvsRef = await uploadKvs(this.opts.bee, this.opts.stamp, kvs)
-    const encryptedGlRef = await this.uploadEncryptedGranteeList(args.publisher, args.grantees)
+    const encryptedGlRef = await this.saveGranteeList(args.publisher, allGrantees)
 
     const history = createEmptyHistory()
-    addHistoryEntry(history, {
-      timestamp: Math.floor(Date.now() / 1000),
+    await this.appendHistoryEntry(history, {
       kvsRef,
       metadata: { encryptedglref: bytesToHex(encryptedGlRef) },
     })
@@ -102,11 +107,10 @@ export class ActClient {
     }
 
     const kvsRef = await uploadKvs(this.opts.bee, this.opts.stamp, kvs)
-    const encryptedGlRef = await this.uploadEncryptedGranteeList(args.publisher, nextGrantees)
+    const encryptedGlRef = await this.saveGranteeList(args.publisher, nextGrantees)
 
     const history = await downloadHistory(this.opts.bee, args.historyRef)
-    addHistoryEntry(history, {
-      timestamp: this.nextTimestamp(history),
+    await this.appendHistoryEntry(history, {
       kvsRef,
       metadata: { encryptedglref: bytesToHex(encryptedGlRef) },
     })
@@ -132,11 +136,10 @@ export class ActClient {
     }
 
     const kvsRef = await uploadKvs(this.opts.bee, this.opts.stamp, kvs)
-    const encryptedGlRef = await this.uploadEncryptedGranteeList(args.publisher, remaining)
+    const encryptedGlRef = await this.saveGranteeList(args.publisher, remaining)
 
     const history = await downloadHistory(this.opts.bee, args.historyRef)
-    addHistoryEntry(history, {
-      timestamp: this.nextTimestamp(history),
+    await this.appendHistoryEntry(history, {
       kvsRef,
       metadata: { encryptedglref: bytesToHex(encryptedGlRef) },
     })
@@ -149,24 +152,30 @@ export class ActClient {
     const entry = lookupHistory(history, Math.floor(Date.now() / 1000))
     if (!entry) return []
 
-    const encGlRef = entry.metadata.encryptedglref
-    if (!encGlRef) return []
+    const encGlRefHex = entry.metadata.encryptedglref
+    if (!encGlRefHex) return []
 
-    const encBytes = await this.opts.bee.downloadData(hexToBytes(encGlRef))
     const publisherPub = publicKeyFromPrivate(args.publisher)
     const [, publisherAKDec] = deriveKvsKeys(ecdhX(args.publisher, publisherPub))
-    const plaintext = decrypt(encBytes.toUint8Array(), publisherAKDec, 0)
-    return deserializeGranteeList(plaintext)
+
+    // The stored value is the encrypted 32-byte Swarm reference to the plaintext list.
+    const granteeRef = decrypt(hexToBytes(encGlRefHex), publisherAKDec, 0)
+    const plaintextBytes = await this.opts.bee.downloadData(granteeRef)
+    return deserializeGranteeList(plaintextBytes.toUint8Array())
   }
 
-  private async uploadEncryptedGranteeList(publisher: Uint8Array, grantees: Uint8Array[]): Promise<Uint8Array> {
+  /**
+   * Upload the plaintext grantee list to Swarm, then encrypt its 32-byte reference
+   * with the publisher's self-ECDH key. This matches Bee's encryptRefForPublisher wire format.
+   */
+  private async saveGranteeList(publisher: Uint8Array, grantees: Uint8Array[]): Promise<Uint8Array> {
+    const plaintext = serializeGranteeList(grantees)
+    const uploaded = await this.opts.bee.uploadData(this.opts.stamp, plaintext)
+    const granteeRef = uploaded.reference.toUint8Array()
+
     const publisherPub = publicKeyFromPrivate(publisher)
     const [, publisherAKDec] = deriveKvsKeys(ecdhX(publisher, publisherPub))
-
-    const plaintext = serializeGranteeList(grantees)
-    const ciphertext = encrypt(plaintext, publisherAKDec, 0)
-    const result = await this.opts.bee.uploadData(this.opts.stamp, ciphertext)
-    return result.reference.toUint8Array()
+    return encrypt(granteeRef, publisherAKDec, 0)
   }
 
   private async getAccessKeyAsPublisher(publisher: Uint8Array, historyRef: Uint8Array): Promise<Uint8Array> {
@@ -195,10 +204,27 @@ export class ActClient {
     return decrypt(encAccessKey, accessKeyDecryptionKey, 0)
   }
 
-  private nextTimestamp(history: Awaited<ReturnType<typeof downloadHistory>>): number {
-    const now = Math.floor(Date.now() / 1000)
+  /**
+   * Add a history entry with the current second as timestamp.
+   * If that second is already occupied (e.g. two rapid calls), wait 1 s and retry
+   * rather than writing a future timestamp that would confuse history lookups.
+   */
+  private async appendHistoryEntry(
+    history: Awaited<ReturnType<typeof downloadHistory>>,
+    entry: { kvsRef: Uint8Array; metadata: Record<string, string> },
+  ): Promise<void> {
     const entries = collectHistoryEntries(history)
-    const latest = entries.at(-1)?.timestamp ?? 0
-    return Math.max(now, latest + 1)
+    const usedTimestamps = new Set(entries.map(e => e.timestamp))
+
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const ts = Math.floor(Date.now() / 1000)
+      if (!usedTimestamps.has(ts)) {
+        addHistoryEntry(history, { timestamp: ts, kvsRef: entry.kvsRef, metadata: entry.metadata })
+        return
+      }
+      await new Promise(resolve => setTimeout(resolve, 1100))
+    }
+
+    throw new Error('ACT: could not find a free timestamp slot after 10 attempts')
   }
 }
