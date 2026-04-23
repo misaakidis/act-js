@@ -1,15 +1,16 @@
 {
   "name": "@nook/act-js",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
-  "description": "Internal ACT library for Nook with Bee wire compatibility.",
+  "description": "Swarm ACT library.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
     "dist"
   ],
   "scripts": {
+    "prepare": "tsc",
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
